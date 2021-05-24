@@ -1,0 +1,318 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS Pipeline for AUTH Lambda Function'
+
+Parameters:
+  AppName:
+    Type: String
+
+  BucketNamePrefix:
+    Type: String
+    Default: "info.softcomweb"
+
+  GithubOwner:
+    Type: String
+    Default: "leacoco"
+
+  GithubRepo:
+    Type: String
+    AllowedPattern: "[A-Za-z0-9-/_]+"
+
+  GithubBranch:
+    Type: String
+    Default: 'main'
+
+  GithubToken:
+    Type: String
+
+  Environment:
+    Type: String
+
+Resources:
+
+  #############################################################
+  ## Roles and Policies
+  #############################################################
+
+  CodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service: [ codepipeline.amazonaws.com ]
+            Action: sts:AssumeRole
+      Policies:
+        -
+          PolicyName: "CodePipelineRolePolicy"
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+            -
+              Effect: Allow
+              Action:
+                - iam:ListRoles
+              Resource: "*"
+            -
+              Effect: Allow
+              Action:
+                - iam:PassRole
+              Resource: "*"
+            -
+              Effect: Allow
+              Action:
+                - cloudformation:DescribeChangeSet
+                - cloudformation:DescribeAccountLimits
+                - cloudformation:ListStacks
+                - cloudformation:ValidateTemplate
+              Resource: "*"
+            -
+              Effect: Allow
+              Action:
+                - kms:*
+                - s3:*
+                - codebuild:*
+              Resource: "*"
+  DeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - cloudformation.amazonaws.com
+                - codebuild.amazonaws.com
+              AWS:
+                - !Sub "${CodePipelineRole.Arn}"
+            Action: sts:AssumeRole
+      Policies:
+        -
+          PolicyName: "DeployRolePolicy"
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - s3:*
+                Resource:
+                - "arn:aws:s3:::ArtifactsBucket"
+                - "arn:aws:s3:::ArtifactsBucket/*"
+
+              -
+                Effect: Allow
+                Action:
+                  - iam:PassRole
+                  - cloudformation:*
+                  - kms:*
+                  - iam:CreateRole
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - lambda:*
+                Resource: "*"
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: [ codebuild.amazonaws.com ]
+          Action: sts:AssumeRole
+      Path: /
+      Policies:
+        -
+          PolicyName: CodeBuildLogs
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub "arn:aws:logs::${AWS::Region}::${AWS::AccountId}:log-group:/aws/codebuild/*"
+              -
+                Effect: Allow
+                Action:
+                  - s3:*
+                  - kms:*
+                Resource: "*"
+
+  ########################################################
+  # Buckets
+  ########################################################
+
+  ArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${BucketNamePrefix}-${AWS::StackName}"
+      AccessControl: Private
+      LifecycleConfiguration:
+        Rules:
+          - NoncurrentVersionExpirationInDays: 7
+            Status: Enabled
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  ArtifactsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactsBucket
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:*
+            Principal:
+              AWS:
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Resource:
+              - !Sub "arn:aws:s3:::${ArtifactsBucket}"
+              - !Sub "arn:aws:s3:::${ArtifactsBucket}/*"
+
+  ########################################################
+  # CodeBuild
+  ########################################################
+
+  CodeBuildProjectLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/codebuild/${AppName}-codebuild"
+      RetentionInDays: 1
+
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub "${AWS::StackName}-codebuild"
+      Description: !Sub "Build project for ${AppName}"
+      ServiceRole: !GetAtt "CodeBuildRole.Arn"
+      Artifacts:
+        Type: CODEPIPELINE
+      EncryptionKey: !Sub "${CodePipelineEncryptionKey.Arn}"
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Ref "CodeBuildProjectLogGroup"
+      Environment:
+          Type: LINUX_CONTAINER
+          ComputeType: BUILD_GENERAL1_SMALL
+          Image: "aws/codebuild/python:3.7.1"
+          EnvironmentVariables:
+            - Name: ARTIFACTS_BUCKET
+              Value: !Sub "${ArtifactsBucket}"
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: "./buildspec.yaml"
+
+  ########################################################
+  # Pipeline
+  ########################################################
+  CodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      RoleArn: !Sub "${CodePipelineRole.Arn}"
+      ArtifactStore:
+        Location: !Sub "${ArtifactsBucket}"
+        Type: S3
+        EncryptionKey:
+          Id: !Sub "${CodePipelineEncryptionKey.Arn}"
+          Type: KMS
+      RestartExecutionOnUpdate: false
+      Stages:
+        -
+          Name: Source
+          Actions:
+            -
+              Name: GitCheckout
+              InputArtifacts: []
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: 1
+              Configuration:
+                Owner: !Ref GithubOwner
+                Repo: !Ref GithubRepo
+                Branch: !Ref GithubBranch
+                PollForSourceChanges: false
+                OAuthToken: !Ref GithubToken
+              OutputArtifacts:
+                - Name: Source
+              RunOrder: 1
+        -
+          Name: Build
+          Actions:
+            -
+              Name: Build
+              RunOrder: 2
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: 1
+              Configuration:
+                ProjectName:
+                  Ref: CodeBuildProject
+              InputArtifacts:
+                - Name: Source
+              OutputArtifacts:
+                - Name: Build
+        -
+          Name: Deploy
+          Actions:
+            -
+              Name: CloudFormationDeployment
+              RunOrder: 3
+              InputArtifacts:
+                - Name: Build
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: 1
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                RoleArn: !Sub "${DeployRole.Arn}"
+                Capabilities: "CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND"
+                StackName: !Sub "${AppName}"
+                TemplatePath: "Build::packaged.yaml"
+                TemplateConfiguration: !Sub "Build::config/sam-template-config.${Environment}.json"
+                OutputFileName: "CreateStackOutput.json"
+              OutputArtifacts:
+                - Name: Deploy
+
+  GithubWebhook:
+    Type: AWS::CodePipeline::Webhook
+    Properties:
+      Authentication: GITHUB_HMAC
+      AuthenticationConfiguration:
+        SecretToken: !Ref GithubToken
+      RegisterWithThirdParty: true
+      Filters:
+      - JsonPath: "$.ref"
+        MatchEquals: refs/heads/{Branch}
+      TargetPipeline: !Ref CodePipeline
+      TargetAction: GitCheckout
+      TargetPipelineVersion: !GetAtt CodePipeline.Version
+
+Outputs:
+  PipelineUrl:
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/codesuite/codepipeline/pipelines/${CodePipeline}/view?region=${AWS::Region}#"
