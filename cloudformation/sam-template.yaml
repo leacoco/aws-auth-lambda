@@ -1,0 +1,25 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+Description: 'Provide an OIDC authentification function'
+
+Resources:
+  AuthFunction:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}"
+      Handler: auth.handler
+      Runtime: python3.7
+      CodeUri: ./src
+      Description: >-
+        Perform OIDC Authentication using a Bearer Token provided with the Authentication header
+      MemorySize: 128
+      Timeout: 10
+      Environment:
+        Variables:
+          ALLOWED_ISSUERS: |
+            localhost:8081
+
+Outputs:
+  AuthFunctionArn:
+    Description: "The ARN of the OIDC Auth Function"
+    Value: !Ref AuthFunction
