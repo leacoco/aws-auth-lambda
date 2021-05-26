@@ -1,0 +1,10 @@
+{
+    "Parameters": {
+    },
+    "Tags": {
+        "service": "auth-function",
+        "team": "ops",
+        "vertical": "auth",
+        "environment": "live"
+    }
+}

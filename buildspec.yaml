@@ -1,0 +1,18 @@
+version: 0.2
+
+phases:
+  install:
+    commands:
+      - pip install --user aws-sam-cli
+      - USER_BASE_PATH=$(python -m site --user-base)
+      - export PATH=$PATH:$USER_BASE_PATH/bin
+      - sam build --template ./cloudformation/sam-template.yaml -s .
+      - aws cloudformation package
+          --template .aws-sam/build/template.yaml
+          --output-template-file packaged.yaml
+          --s3-bucket "${ARTIFACTS_BUCKET}"
+          --s3-prefix lambda
+
+artifacts:
+  files:
+    - '**/*'

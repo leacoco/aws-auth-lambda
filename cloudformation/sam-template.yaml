@@ -8,7 +8,7 @@ Resources:
     Properties:
       FunctionName: !Sub "${AWS::StackName}"
       Handler: auth.handler
-      Runtime: python3.7
+      Runtime: python3.8
       CodeUri: ./src
       Description: >-
         Perform OIDC Authentication using a Bearer Token provided with the Authentication header
