@@ -1,0 +1,175 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: "AWS::Serverless-2016-10-31"
+Description: "Example api gateway template\n"
+
+
+Parameters:
+  Environment:
+    Type: String
+
+  LambdaLayerArn:
+    Type: AWS::SSM::Parameter::Value<String>
+
+
+Conditions:
+  LiveOrNonlive: !Or [!Equals [!Ref Environment, "nonlive"], !Equals [!Ref Environment ,"live"]]
+
+Resources:
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "softcomweb-api-${Environment}"
+      RetentionInDays: 7
+
+  ApiGatewayApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: prod
+      Auth:
+        DefaultAuthorizer: LambdaTokenAuthorizer
+        Authorizers:
+          LambdaTokenAuthorizer:
+            FunctionArn: !Sub "arn:aws:lambda:eu-west-1:${AWS::AccountId}:function:softcomweb-auth-function-${Environment}"
+      Cors: "'*'"
+      AccessLogSetting:
+        DestinationArn: !GetAtt ApiLogGroup.Arn
+        Format: "{\"requestId\":\"$context.requestId\",\"timestamp\":\"$context.requestTime\",\"httpMethod\":\"$context.httpMethod\",\"statusCode\":\"$context.status\",\"path\":\"$context.path\",\"sourceIPAddress\":\"$context.identity.sourceIp\",\"userAgent\":\"$context.identity.userAgent\",\"context\":{\"apiId\":\"$context.apiId\",\"stage\":\"$context.stage\",\"errorMessage\":\"$context.error.message\"}}"
+
+  PostRealm:
+    Type: "AWS::Serverless::Function"
+    Properties:
+      FunctionName:
+        Fn::Sub: "${AWS::StackName}-create-team-realm"
+      CodeUri: src/
+      Handler: app.lambda_handler
+      Runtime: python3.7
+      Events:
+        ProxyApiRoot:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGatewayApi
+            Path: /realm
+            Method: POST
+      Policies:
+        Statement:
+          -
+            Effect: Allow
+            Action:
+              - "secretsmanager:DescribeSecret"
+              - "secretsmanager:GetSecretValue"
+            Resource:
+              - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:/si-auth-federationservice/admin-*"
+              - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:/si-auth-federationservice/client-secrets/*"
+              - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:/general/apm-settings*"
+          -
+            Effect: Allow
+            Action:
+              - "dynamodb:PutItem"
+            Resource:
+              - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${AWS::StackName}-auditlog"
+          -
+            Effect: Allow
+            Action:
+              - "ssm:GetParameter*"
+            Resource:
+              - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/si-auth-federationservice/ocn/p2"
+          -
+            Effect: Allow
+            Action:
+              - "kms:Decrypt"
+              - "kms:Describe*"
+              - "kms:List*"
+              - "kms:Get*"
+            Resource:
+              - "*"
+
+  ApiFunctionInvokePermissionForApiGateway:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt PostRealm.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+
+  AuthFunctionInvokePermissionForApiGateway:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub "arn:aws:lambda:eu-west-1:${AWS::AccountId}:function:si-auth-function-${Environment}"
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+
+  ApiGatewayLoggingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: apigateway.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - Fn::Sub: "arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs"
+
+  ApiGatewayAccountConfig:
+    Type: AWS::ApiGateway::Account
+    Properties:
+      CloudWatchRoleArn: !Sub "${ApiGatewayLoggingRole.Arn}"
+
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Join ['', ['*.realm-api', '.', !Sub "${Environment}.si.softcomweb.info"]]
+      ValidationMethod: DNS
+      Tags: []
+
+  ApiDomainName:
+    Type: AWS::ApiGateway::DomainName
+    Properties:
+      DomainName: !If [LiveOrNonlive, !Sub "team.realm-api.${Environment}.si.softcomweb.info", !Sub "${Environment}.realm-api.${Environment}.si.softcomweb.info"]
+      EndpointConfiguration:
+        Types: [ REGIONAL ]
+      RegionalCertificateArn: !Ref Certificate
+
+  Mapping:
+    Type: AWS::ApiGateway::BasePathMapping
+    Properties:
+      DomainName: !Ref ApiDomainName
+      RestApiId: !Ref ApiGatewayApi
+      Stage: "prod"
+      BasePath: "api"
+
+  DNSARecord:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneName: !Sub "${Environment}.si.softcomweb.info."
+      RecordSets:
+        - Name: !If [LiveOrNonlive, !Sub "team.realm-api.${Environment}.si.softcomweb.info.", !Sub "${Environment}.realm-api.${Environment}.si.softcomweb.info."]
+          Type: A
+          AliasTarget:
+            EvaluateTargetHealth: false
+            HostedZoneId: !GetAtt ApiDomainName.RegionalHostedZoneId
+            DNSName: !GetAtt ApiDomainName.RegionalDomainName
+
+  DynamoDBTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${AWS::StackName}-auditlog"
+      KeySchema:
+        - AttributeName: "RealmName"
+          KeyType: "HASH"
+        - AttributeName: "RealmAdminGroup"
+          KeyType: "RANGE"
+      AttributeDefinitions:
+        - AttributeName: "RealmName"
+          AttributeType: "S"
+        - AttributeName: "RealmAdminGroup"
+          AttributeType: "S"
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+
+Outputs:
+  ApiUrl:
+    Description: Url for the api gateway
+    Value: !Sub 'https://${ApiDomainName}/api/realm'
+
